@@ -106,7 +106,7 @@ async def test_boost_page_post_happy_path_chains_all_steps_paused():
         api.side_effect = [TOKEN_EXCHANGE, _post(promotable=f"{PAGE}_777")]
         campaign.return_value = json.dumps({"id": "c1"})
         adset.return_value = json.dumps({"id": "s1"})
-        creative.return_value = json.dumps({"id": "cr1", "name": "x"})
+        creative.return_value = json.dumps({"success": True, "creative_id": "cr1", "details": {"id": "cr1", "status": "IN_PROCESS"}})
         ad.return_value = json.dumps({"id": "a1"})
 
         result = _load(await boost_page_post(
@@ -135,6 +135,8 @@ async def test_boost_page_post_happy_path_chains_all_steps_paused():
         skw = adset.call_args.kwargs
         assert skw["campaign_id"] == "c1" and skw["daily_budget"] == 2000
         assert skw["optimization_goal"] == "POST_ENGAGEMENT" and skw["destination_type"] == "ON_POST"
+        # explicit bid strategy — never left to the account default (error 2490487)
+        assert skw["bid_strategy"] == "LOWEST_COST_WITHOUT_CAP"
         assert skw["targeting"]["geo_locations"]["countries"] == ["PL"]
         assert skw["dsa_beneficiary"] == "K2 Precise"
 
@@ -199,3 +201,27 @@ async def test_boost_page_post_validates_budget_before_any_call():
         assert "end_time" in no_end["error"]
 
         api.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_boost_page_post_unparseable_step_keeps_full_response_and_bid_cap_strategy():
+    with patch("meta_ads_mcp.core.pages.make_api_request", new_callable=AsyncMock) as api, \
+         patch("meta_ads_mcp.core.pages.create_campaign", new_callable=AsyncMock) as campaign, \
+         patch("meta_ads_mcp.core.pages.create_adset", new_callable=AsyncMock) as adset, \
+         patch("meta_ads_mcp.core.pages.create_ad_creative", new_callable=AsyncMock) as creative, \
+         patch("meta_ads_mcp.core.pages.create_ad", new_callable=AsyncMock) as ad:
+        api.side_effect = [TOKEN_EXCHANGE, _post()]
+        campaign.return_value = json.dumps({"id": "c1"})
+        adset.return_value = json.dumps({"id": "s1"})
+        creative.return_value = json.dumps({"success": True, "details": {"status": "IN_PROCESS"}})  # no id anywhere
+
+        result = _load(await boost_page_post(
+            account_id="act_1", post_id=POST, daily_budget=1000, bid_amount=150, access_token=TOKEN,
+        ))
+
+        assert result["error"]["step"] == "create_ad_creative"
+        assert result["error"]["message"] == "no id returned"
+        assert result["error"]["response"] == {"success": True, "details": {"status": "IN_PROCESS"}}
+        assert adset.call_args.kwargs["bid_strategy"] == "LOWEST_COST_WITH_BID_CAP"
+        assert adset.call_args.kwargs["bid_amount"] == 150
+        ad.assert_not_called()

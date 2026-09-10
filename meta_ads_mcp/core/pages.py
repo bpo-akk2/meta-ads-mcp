@@ -44,12 +44,23 @@ def _parse_tool_result(raw: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {"data": data}
 
 
+def _result_id(data: Dict[str, Any]) -> Optional[str]:
+    """Tools disagree on where the created id lives: create_* return {"id"},
+    create_ad_creative returns {"success", "creative_id", "details"}."""
+    return data.get("id") or data.get("creative_id") or (data.get("details") or {}).get("id")
+
+
 def _step_error(step: str, data: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize a failed step into {'step': ..., ...error fields}."""
+    """Normalize a failed step into {'step': ..., ...error fields}.
+
+    When the tool returned no error but also no id, keep its full response —
+    "no id returned" alone is undiagnosable."""
     err = data.get("error")
-    if not isinstance(err, dict):
-        err = {"message": err or "no id returned"}
-    return {"step": step, **err}
+    if isinstance(err, dict):
+        return {"step": step, **err}
+    if err:
+        return {"step": step, "message": err, **{k: v for k, v in data.items() if k != "error"}}
+    return {"step": step, "message": "no id returned", "response": data}
 
 
 def _post_summary(post: Dict[str, Any]) -> Dict[str, Any]:
@@ -247,7 +258,9 @@ async def boost_page_post(
         optimization_goal: Ad set optimization goal (default: POST_ENGAGEMENT; also REACH, LINK_CLICKS...)
         billing_event: Ad set billing event (default: IMPRESSIONS)
         destination_type: Ad set destination (default: ON_POST; set None to omit)
-        bid_strategy: Ad set bid strategy (default: campaign's / LOWEST_COST_WITHOUT_CAP)
+        bid_strategy: Ad set bid strategy. Default: LOWEST_COST_WITHOUT_CAP, or LOWEST_COST_WITH_BID_CAP
+                      when bid_amount is given. Always set explicitly — an ad set in a campaign without a
+                      budget otherwise inherits the account default, which may demand a bid cap (error 2490487).
         bid_amount: Bid cap in cents when bid_strategy needs one
         dsa_beneficiary: DSA beneficiary (EU accounts — usually the client's legal name)
         dsa_payor: DSA payor (EU accounts — usually the agency)
@@ -307,10 +320,10 @@ async def boost_page_post(
             use_adset_level_budgets=True,
             access_token=access_token,
         ))
-        if _has_error(campaign) or not campaign.get("id"):
+        campaign_id = None if _has_error(campaign) else _result_id(campaign)
+        if not campaign_id:
             result["error"] = _step_error("create_campaign", campaign)
             return json.dumps(result, indent=2)
-        campaign_id = campaign["id"]
         result["campaign_created"] = True
     result["campaign_id"] = campaign_id
 
@@ -325,7 +338,7 @@ async def boost_page_post(
         daily_budget=daily_budget,
         lifetime_budget=lifetime_budget,
         targeting=targeting or {"geo_locations": {"countries": ["PL"]}, "age_min": 18, "age_max": 65},
-        bid_strategy=bid_strategy,
+        bid_strategy=bid_strategy or ("LOWEST_COST_WITH_BID_CAP" if bid_amount else "LOWEST_COST_WITHOUT_CAP"),
         bid_amount=bid_amount,
         start_time=start_time,
         end_time=end_time,
@@ -334,10 +347,11 @@ async def boost_page_post(
         destination_type=destination_type,
         access_token=access_token,
     ))
-    if _has_error(adset) or not adset.get("id"):
+    adset_id = None if _has_error(adset) else _result_id(adset)
+    if not adset_id:
         result["error"] = _step_error("create_adset", adset)
         return json.dumps(result, indent=2)
-    result["adset_id"] = adset["id"]
+    result["adset_id"] = adset_id
 
     # 4. Creative from the existing post
     creative = _parse_tool_result(await create_ad_creative(
@@ -346,24 +360,26 @@ async def boost_page_post(
         name=f"{label} - creative",
         access_token=access_token,
     ))
-    if _has_error(creative) or not creative.get("id"):
+    creative_id = None if _has_error(creative) else _result_id(creative)
+    if not creative_id:
         result["error"] = _step_error("create_ad_creative", creative)
         return json.dumps(result, indent=2)
-    result["creative_id"] = creative["id"]
+    result["creative_id"] = creative_id
 
     # 5. Ad
     ad = _parse_tool_result(await create_ad(
         account_id=account_id,
         name=ad_name or label,
-        adset_id=adset["id"],
-        creative_id=creative["id"],
+        adset_id=adset_id,
+        creative_id=creative_id,
         status=status,
         access_token=access_token,
     ))
-    if _has_error(ad) or not ad.get("id"):
+    ad_id = None if _has_error(ad) else _result_id(ad)
+    if not ad_id:
         result["error"] = _step_error("create_ad", ad)
         return json.dumps(result, indent=2)
-    result["ad_id"] = ad["id"]
+    result["ad_id"] = ad_id
     result["status"] = status
     if status == "PAUSED":
         result["next_step"] = "Review in Ads Manager, then activate the ad set/ad (update_adset / update_ad with status=ACTIVE)."
