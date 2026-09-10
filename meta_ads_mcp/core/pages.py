@@ -63,6 +63,31 @@ def _post_summary(post: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 
+async def _page_token(page_id: Union[str, int], access_token: str) -> Optional[str]:
+    """Exchange the (system) user token for a Page access token.
+
+    Graph API rejects Page content reads with a user token
+    (error 190 / subcode 2069032 "A page access token is required"); the exchange
+    works for any Page the token holder has a task on, given pages_show_list.
+    """
+    data = await make_api_request(str(page_id), access_token, {"fields": "access_token"})
+    if _has_error(data):
+        return None
+    return data.get("access_token")
+
+
+async def _page_read(endpoint: str, page_id: Union[str, int], access_token: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """GET a Page-owned object with a Page token when obtainable, else the user token."""
+    token = await _page_token(page_id, access_token) or access_token
+    return await make_api_request(endpoint, token, params)
+
+
+def _page_id_from_post(post_id: str, page_id: Optional[Union[str, int]]) -> Optional[str]:
+    if page_id:
+        return str(page_id)
+    return post_id.split("_", 1)[0] if "_" in post_id else None
+
+
 def _normalize_post_id(post_id: Union[str, int], page_id: Optional[Union[str, int]]) -> str:
     """Accept '{page_id}_{post_id}', a bare post id + page_id, or a bare post id."""
     post_id = str(post_id).strip()
@@ -109,11 +134,12 @@ async def get_page_posts(
     if until:
         params["until"] = until
 
-    data = await make_api_request(f"{page_id}/posts", access_token, params)
+    data = await _page_read(f"{page_id}/posts", page_id, access_token, params)
     if _has_error(data):
         data["hint"] = (
-            "Page posts need a token with a role on this Page: assign the Page to the system user "
-            "in Business Settings and generate the token with pages_show_list + pages_read_engagement."
+            "Page posts need a token with a task on this Page: assign the Page to the system user "
+            "in Business Settings (at least Content + Ads) and generate the token with "
+            "pages_show_list + pages_read_engagement."
         )
         return json.dumps(data, indent=2)
 
@@ -153,7 +179,11 @@ async def get_page_post(
         return json.dumps({"error": "No post ID provided"}, indent=2)
 
     full_id = _normalize_post_id(post_id, page_id)
-    data = await make_api_request(full_id, access_token, {"fields": PAGE_POST_FIELDS})
+    owner = _page_id_from_post(full_id, page_id)
+    if owner:
+        data = await _page_read(full_id, owner, access_token, {"fields": PAGE_POST_FIELDS})
+    else:
+        data = await make_api_request(full_id, access_token, {"fields": PAGE_POST_FIELDS})
     if _has_error(data):
         if "_" not in full_id:
             data["hint"] = "Pass page_id as well, or use the '{page_id}_{post_id}' form."
@@ -244,7 +274,11 @@ async def boost_page_post(
     result: Dict[str, Any] = {"account_id": account_id, "requested_status": status}
 
     # 1. Resolve the post — the creative must reference promotable_id, not necessarily the post id.
-    post = await make_api_request(full_id, access_token, {"fields": PAGE_POST_FIELDS})
+    owner = _page_id_from_post(full_id, page_id)
+    if owner:
+        post = await _page_read(full_id, owner, access_token, {"fields": PAGE_POST_FIELDS})
+    else:
+        post = await make_api_request(full_id, access_token, {"fields": PAGE_POST_FIELDS})
     if _has_error(post):
         result["error"] = _step_error("get_post", post)
         return json.dumps(result, indent=2)

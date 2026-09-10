@@ -10,6 +10,8 @@ from meta_ads_mcp.core.pages import get_page_posts, get_page_post, boost_page_po
 PAGE = "484197734962371"
 POST = f"{PAGE}_931045965194925"
 TOKEN = "test_token"
+PAGE_TOKEN = "page_token"
+TOKEN_EXCHANGE = {"access_token": PAGE_TOKEN, "id": PAGE}
 
 
 def _load(raw: str) -> dict:
@@ -36,19 +38,23 @@ def _post(post_id=POST, promotable=None, eligible=True):
 @pytest.mark.asyncio
 async def test_get_page_posts_adds_object_story_id_and_filters():
     with patch("meta_ads_mcp.core.pages.make_api_request", new_callable=AsyncMock) as api:
-        api.return_value = {
+        posts_page = {
             "data": [
                 _post(),
                 _post(post_id=f"{PAGE}_111", promotable=f"{PAGE}_999", eligible=False),
             ],
             "paging": {"cursors": {"after": "abc"}},
         }
+        api.side_effect = [TOKEN_EXCHANGE, posts_page, TOKEN_EXCHANGE, posts_page]
 
         result = _load(await get_page_posts(page_id=PAGE, limit=5, since="2026-08-01", access_token=TOKEN))
 
-        endpoint, token, params = api.call_args[0]
+        # 1st call exchanges the user token for a Page token, 2nd reads posts with it
+        assert api.call_args_list[0][0][:2] == (PAGE, TOKEN)
+        assert api.call_args_list[0][0][2] == {"fields": "access_token"}
+        endpoint, token, params = api.call_args_list[1][0]
         assert endpoint == f"{PAGE}/posts"
-        assert token == TOKEN
+        assert token == PAGE_TOKEN
         assert params["limit"] == 5 and params["since"] == "2026-08-01"
         assert "promotable_id" in params["fields"] and "is_eligible_for_promotion" in params["fields"]
 
@@ -66,8 +72,12 @@ async def test_get_page_posts_adds_object_story_id_and_filters():
 @pytest.mark.asyncio
 async def test_get_page_posts_error_carries_permission_hint():
     with patch("meta_ads_mcp.core.pages.make_api_request", new_callable=AsyncMock) as api:
-        api.return_value = {"error": {"message": "(#10) Permission denied", "code": 10}}
+        api.side_effect = [
+            {"error": {"message": "no page token", "code": 100}},          # exchange fails
+            {"error": {"message": "(#10) Permission denied", "code": 10}},  # posts read with user token
+        ]
         result = _load(await get_page_posts(page_id=PAGE, access_token=TOKEN))
+        assert api.call_args_list[1][0][1] == TOKEN  # fell back to the user token
         assert result["error"]["code"] == 10
         assert "pages_read_engagement" in result["hint"]
 
@@ -75,13 +85,14 @@ async def test_get_page_posts_error_carries_permission_hint():
 @pytest.mark.asyncio
 async def test_get_page_post_builds_full_id_from_bare_id():
     with patch("meta_ads_mcp.core.pages.make_api_request", new_callable=AsyncMock) as api:
-        api.return_value = _post()
+        api.side_effect = [TOKEN_EXCHANGE, _post(), TOKEN_EXCHANGE, _post()]
         result = _load(await get_page_post(post_id="931045965194925", page_id=PAGE, access_token=TOKEN))
-        assert api.call_args[0][0] == POST
+        assert api.call_args[0][:2] == (POST, PAGE_TOKEN)
         assert result["object_story_id"] == POST
 
-        # already-qualified id is passed through untouched
+        # already-qualified id: page id is derived from the prefix, id passed through untouched
         await get_page_post(post_id=POST, access_token=TOKEN)
+        assert api.call_args_list[2][0][0] == PAGE
         assert api.call_args[0][0] == POST
 
 
@@ -92,7 +103,7 @@ async def test_boost_page_post_happy_path_chains_all_steps_paused():
          patch("meta_ads_mcp.core.pages.create_adset", new_callable=AsyncMock) as adset, \
          patch("meta_ads_mcp.core.pages.create_ad_creative", new_callable=AsyncMock) as creative, \
          patch("meta_ads_mcp.core.pages.create_ad", new_callable=AsyncMock) as ad:
-        api.return_value = _post(promotable=f"{PAGE}_777")
+        api.side_effect = [TOKEN_EXCHANGE, _post(promotable=f"{PAGE}_777")]
         campaign.return_value = json.dumps({"id": "c1"})
         adset.return_value = json.dumps({"id": "s1"})
         creative.return_value = json.dumps({"id": "cr1", "name": "x"})
@@ -142,7 +153,7 @@ async def test_boost_page_post_reuses_campaign_and_reports_partial_failure():
          patch("meta_ads_mcp.core.pages.create_adset", new_callable=AsyncMock) as adset, \
          patch("meta_ads_mcp.core.pages.create_ad_creative", new_callable=AsyncMock) as creative, \
          patch("meta_ads_mcp.core.pages.create_ad", new_callable=AsyncMock) as ad:
-        api.return_value = _post()
+        api.side_effect = [TOKEN_EXCHANGE, _post()]
         adset.return_value = json.dumps({"id": "s1"})
         creative.return_value = json.dumps({"error": "Failed to create ad creative", "details": "Post not owned by ad's Page"})
 
@@ -166,7 +177,7 @@ async def test_boost_page_post_refuses_ineligible_post_unless_forced():
          patch("meta_ads_mcp.core.pages.create_adset", new_callable=AsyncMock) as adset, \
          patch("meta_ads_mcp.core.pages.create_ad_creative", new_callable=AsyncMock) as creative, \
          patch("meta_ads_mcp.core.pages.create_ad", new_callable=AsyncMock) as ad:
-        api.return_value = _post(eligible=False)
+        api.side_effect = [TOKEN_EXCHANGE, _post(eligible=False), TOKEN_EXCHANGE, _post(eligible=False)]
 
         result = _load(await boost_page_post(account_id="act_1", post_id=POST, daily_budget=1000, access_token=TOKEN))
         assert result["error"]["step"] == "eligibility"
