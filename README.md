@@ -510,6 +510,41 @@ For advanced users who need to self-host, the package can be installed from sour
       - `query`: Search query string (e.g., "Injury Payouts pages", "active campaigns")
     - Returns: List of matching record IDs in ChatGPT-compatible format
 
+30. `mcp_meta_ads_get_page_posts`
+   - List organic posts published on a Facebook Page, with the ids needed to boost them
+   - Inputs:
+     - `access_token` (optional): Meta API access token (will use cached token if not provided)
+     - `page_id`: Facebook Page ID (use `get_account_pages` to find it)
+     - `limit`: Maximum number of posts to return (default: 25)
+     - `since` / `until`: Date range filter (YYYY-MM-DD or unix timestamp)
+     - `only_promotable`: Return only posts Meta reports as eligible for promotion
+   - Returns: Posts with `object_story_id` (= `promotable_id` when it differs from `id`), `is_eligible_for_promotion`, `permalink_url`
+   - Requires a token with a role on the Page (`pages_show_list`, `pages_read_engagement`)
+
+31. `mcp_meta_ads_get_page_post`
+   - Get one Page post with its `promotable_id` and eligibility — the pre-flight check before boosting
+   - Inputs:
+     - `access_token` (optional): Meta API access token (will use cached token if not provided)
+     - `post_id`: `{page_id}_{post_id}` or the bare post id from the URL (then also pass `page_id`)
+     - `page_id`: Facebook Page ID (required with a bare post id)
+   - Returns: Post fields plus `object_story_id` to pass to `create_ad_creative`
+
+32. `mcp_meta_ads_boost_page_post`
+   - Boost an existing organic Facebook Page post: campaign (optional) → ad set → creative (`object_story_id`) → ad, in one call. Everything is created PAUSED by default.
+   - Inputs:
+     - `access_token` (optional): Meta API access token (will use cached token if not provided)
+     - `account_id`: Meta Ads account ID (format: act_XXXXXXXXX)
+     - `post_id` / `page_id`: The post to boost (see `get_page_post`)
+     - `campaign_id`: Reuse an existing campaign; when omitted a new `OUTCOME_ENGAGEMENT` campaign is created (ad-set-level budget)
+     - `daily_budget` or `lifetime_budget` (+ `end_time`): Ad set budget in account currency cents
+     - `targeting`: Targeting spec (default: Poland, 18-65)
+     - `optimization_goal` (default `POST_ENGAGEMENT`), `billing_event` (default `IMPRESSIONS`), `destination_type` (default `ON_POST`)
+     - `dsa_beneficiary` / `dsa_payor`: Required for EU ad accounts
+     - `status`: Status for all created objects (default `PAUSED`)
+     - `force`: Boost even when `is_eligible_for_promotion` is false
+   - Returns: `campaign_id`, `adset_id`, `creative_id`, `ad_id` — or a partial result plus `error.step` naming the step that failed (ids created so far are still reported)
+   - Requires `pages_manage_ads` + `ads_management` and the Page assigned to the same Business as the ad account
+
 ## Licensing
 
 Meta Ads MCP is licensed under the [Business Source License 1.1](LICENSE), which means:
