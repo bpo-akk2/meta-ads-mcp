@@ -510,6 +510,16 @@ For advanced users who need to self-host, the package can be installed from sour
       - `query`: Search query string (e.g., "Injury Payouts pages", "active campaigns")
     - Returns: List of matching record IDs in ChatGPT-compatible format
 
+### Toolset modes
+
+`META_ADS_MCP_TOOLSET=full` (default) exposes every tool. `META_ADS_MCP_TOOLSET=supplement` hides the tools that
+duplicate the official Meta Ads MCP (campaign / ad set / ad / creative CRUD, account & page lookups, image/video
+helpers, Ads Library, Pipeboard-only tools) and exposes only what the official connector lacks: `get_page_posts`,
+`get_page_post`, `boost_page_post`, targeting research (`search_interests`, `get_interest_suggestions`,
+`search_behaviors`, `search_demographics`, `search_geo_locations`, `estimate_audience_size`),
+`create_budget_schedule` and raw `get_insights`. Hidden functions stay importable — `boost_page_post` still
+chains them internally. Use it when running this server side by side with the official connector.
+
 30. `mcp_meta_ads_get_page_posts`
    - List organic posts published on a Facebook Page, with the ids needed to boost them
    - Inputs:

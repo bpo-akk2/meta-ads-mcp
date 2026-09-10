@@ -224,6 +224,10 @@ def main():
                        help="Use SSE response format instead of JSON (default: JSON, only used with --transport streamable-http)")
     
     args = parser.parse_args()
+
+    # META_ADS_MCP_TOOLSET=supplement hides tools the official Meta MCP already provides
+    from .toolset import apply_toolset_sync
+    apply_toolset_sync(mcp_server)
     logger.debug(f"Parsed args: login={args.login}, app_id={args.app_id}, version={args.version}")
     logger.debug(f"Transport args: transport={args.transport}, port={args.port}, host={args.host}, sse_response={args.sse_response}")
     
